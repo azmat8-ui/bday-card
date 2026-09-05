@@ -166,57 +166,18 @@
     pointer-events:none;
     transition: opacity 0.5s ease;
   }
-  .flame.out{ opacity:0; }
-
-  .mic-ui{
-    position:absolute;
-    left:0; right:0; bottom:4%;
-    display:flex;
-    flex-direction:column;
-    align-items:center;
-    gap:8px;
-    z-index:4;
-    padding:0 6%;
+  @keyframes blowFlame{
+    0%   { transform: rotate(0deg) skewX(0deg) scale(1); opacity:1; }
+    12%  { transform: rotate(-10deg) skewX(-6deg) scale(1.02); }
+    24%  { transform: rotate(14deg) skewX(8deg) scale(0.98); }
+    36%  { transform: rotate(-18deg) skewX(-11deg) scale(0.97); }
+    48%  { transform: rotate(22deg) skewX(13deg) scale(0.94); }
+    62%  { transform: rotate(-20deg) skewX(-13deg) scale(0.88); opacity:0.85; }
+    78%  { transform: rotate(28deg) skewX(18deg) scale(0.7); opacity:0.4; }
+    100% { transform: rotate(34deg) skewX(22deg) scale(0.3); opacity:0; }
   }
-  .meter{
-    width:70%;
-    max-width:260px;
-    height:10px;
-    background:rgba(255,255,255,0.45);
-    border:1px solid rgba(0,0,0,0.25);
-    border-radius:6px;
-    overflow:hidden;
-    box-shadow: inset 0 1px 3px rgba(0,0,0,0.25);
-  }
-  .meter-fill{
-    height:100%;
-    width:0%;
-    background:linear-gradient(90deg,#ffb37a,#ff6b6b);
-    transition:width 0.06s linear;
-  }
-  .blow-btn{
-    font-size:13px;
-    padding:8px 16px;
-    border-radius:20px;
-    border:1px solid rgba(0,0,0,0.3);
-    background:rgba(255,255,255,0.75);
-    color:var(--ink);
-    cursor:pointer;
-    box-shadow:0 2px 6px rgba(0,0,0,0.2);
-    user-select:none;
-    -webkit-user-select:none;
-    touch-action:none;
-  }
-  .blow-btn:active{ background:rgba(255,255,255,0.95); transform:scale(0.97); }
-  .mic-note{
-    font-size:10.5px;
-    text-align:center;
-    max-width:92%;
-    color:#3a2a1c;
-    background:rgba(255,255,255,0.55);
-    padding:4px 8px;
-    border-radius:8px;
-    line-height:1.35;
+  .flame.blowing{
+    animation: blowFlame 1.3s cubic-bezier(.4,0,.6,1) forwards;
   }
 
   .wish-overlay{
@@ -301,11 +262,6 @@
             <div class="wish-text">make a wish, seerat 🎉</div>
             <button class="relight-btn" id="relightBtn">relight 🕯️</button>
           </div>
-          <div class="mic-ui">
-            <div class="meter"><div class="meter-fill" id="meterFill"></div></div>
-            <button class="blow-btn" id="blowBtn">hold to blow 💨</button>
-            <div class="mic-note">real blowing needs the mic + https hosting (won't work opened as a local file) — if it's blocked, hold the button above or hold spacebar instead.</div>
-          </div>
         </div>
       </div>
     </div>
@@ -321,8 +277,6 @@
   var letter = document.getElementById('letter');
   var letterHotspot = document.getElementById('letterHotspot');
   var flame = document.getElementById('flame');
-  var meterFill = document.getElementById('meterFill');
-  var blowBtn = document.getElementById('blowBtn');
   var wishOverlay = document.getElementById('wishOverlay');
   var relightBtn = document.getElementById('relightBtn');
   var confettiCanvas = document.getElementById('confettiCanvas');
@@ -335,7 +289,7 @@
     bookOpen = true;
     book.classList.add('open');
     backBtn.classList.add('show');
-    initMic();
+    scheduleBlow();
   }
   function closeBook(){
     if(!bookOpen) return;
@@ -355,132 +309,40 @@
   letterHotspot.addEventListener('click', function(){ if(!letterOpen) toggleLetter(); });
   letter.addEventListener('click', function(){ if(letterOpen) toggleLetter(); });
 
-  /* ---------------- Candle blowing ---------------- */
-  var audioCtx = null, analyser = null, dataArray = null, micStream = null;
-  var micReady = false;
-  var fallbackActive = false;
-  var emaLevel = 0;
-  var blowStartTime = null;
+  /* ---------------- Candle: automatic blow-out ---------------- */
   var blownOut = false;
-  var rafId = null;
-  var BLOW_THRESHOLD = 0.16;
-  var BLOW_MS = 500;
-  var flicker = 0;
+  var blowTimer = null;
+  var BLOW_DELAY = 1300; // wait for the hinge-open animation to settle first
 
-  function initMic(){
-    if(audioCtx) return; // already attempted
-    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-      micReady = false;
-      startLoop();
-      return;
-    }
-    navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
-      micStream = stream;
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      var source = audioCtx.createMediaStreamSource(stream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.5;
-      dataArray = new Uint8Array(analyser.fftSize);
-      source.connect(analyser);
-      micReady = true;
-      startLoop();
-    }).catch(function(err){
-      micReady = false;
-      startLoop();
-    });
-  }
-
-  function getMicLevel(){
-    if(!micReady || !analyser) return 0;
-    analyser.getByteTimeDomainData(dataArray);
-    var sum = 0;
-    for(var i=0;i<dataArray.length;i++){
-      var v = (dataArray[i]-128)/128;
-      sum += v*v;
-    }
-    var rms = Math.sqrt(sum/dataArray.length);
-    var level = rms * 3.2; // sensitivity
-    return Math.max(0, Math.min(1, level));
-  }
-
-  function startLoop(){
-    if(rafId) return;
-    var loop = function(){
-      rafId = requestAnimationFrame(loop);
-      if(blownOut) return;
-      var micLevel = getMicLevel();
-      var level = Math.max(micLevel, fallbackActive ? 0.9 : 0);
-      emaLevel = emaLevel*0.72 + level*0.28;
-
-      meterFill.style.width = Math.round(Math.min(1, emaLevel*1.05)*100) + '%';
-
-      flicker += 0.25 + emaLevel*0.6;
-      var wobble = Math.sin(flicker) * (2 + emaLevel*3);
-      var bendAngle = emaLevel * 34;
-      var totalAngle = wobble + bendAngle;
-      flame.style.transform = 'rotate(' + totalAngle.toFixed(2) + 'deg) skewX(' + (bendAngle*0.35).toFixed(2) + 'deg) scale(' + (1 - emaLevel*0.12).toFixed(3) + ')';
-
-      if(emaLevel > BLOW_THRESHOLD){
-        if(blowStartTime === null) blowStartTime = performance.now();
-        else if(performance.now() - blowStartTime > BLOW_MS){
-          blowOut();
-        }
-      } else {
-        blowStartTime = null;
-      }
-    };
-    rafId = requestAnimationFrame(loop);
+  function scheduleBlow(){
+    if(blowTimer) clearTimeout(blowTimer);
+    blowTimer = setTimeout(function(){
+      if(bookOpen && !blownOut) blowOut();
+    }, BLOW_DELAY);
   }
 
   function blowOut(){
     blownOut = true;
-    flame.classList.add('out');
-    wishOverlay.classList.add('show');
-    launchConfetti();
-    if(micStream){
-      micStream.getTracks().forEach(function(t){ t.stop(); });
-      micStream = null;
-    }
-    if(audioCtx){ audioCtx.close(); audioCtx = null; }
-    analyser = null; micReady = false;
-    if(rafId){ cancelAnimationFrame(rafId); rafId = null; }
-    meterFill.style.width = '0%';
+    flame.classList.add('blowing');
   }
+  flame.addEventListener('animationend', function(e){
+    if(e.animationName === 'blowFlame'){
+      wishOverlay.classList.add('show');
+      launchConfetti();
+    }
+  });
 
   function resetCandle(){
     blownOut = false;
-    flame.classList.remove('out');
+    flame.classList.remove('blowing');
     wishOverlay.classList.remove('show');
-    blowStartTime = null;
-    emaLevel = 0;
     clearConfetti();
-    if(rafId){ cancelAnimationFrame(rafId); rafId = null; }
+    if(blowTimer){ clearTimeout(blowTimer); blowTimer = null; }
   }
 
   relightBtn.addEventListener('click', function(){
     resetCandle();
-    initMic();
-  });
-
-  /* Fallback hold-to-blow */
-  function setFallback(on){
-    fallbackActive = on;
-    if(on && !rafId) startLoop();
-  }
-  blowBtn.addEventListener('mousedown', function(e){ e.preventDefault(); setFallback(true); });
-  blowBtn.addEventListener('touchstart', function(e){ e.preventDefault(); setFallback(true); }, {passive:false});
-  ['mouseup','mouseleave','touchend','touchcancel'].forEach(function(ev){
-    blowBtn.addEventListener(ev, function(){ setFallback(false); });
-  });
-  window.addEventListener('keydown', function(e){
-    if(e.code === 'Space' && bookOpen && !blownOut){
-      e.preventDefault();
-      setFallback(true);
-    }
-  });
-  window.addEventListener('keyup', function(e){
-    if(e.code === 'Space'){ setFallback(false); }
+    scheduleBlow();
   });
 
   /* ---------------- Confetti ---------------- */
